@@ -7,14 +7,16 @@ export default async function handler(req, res) {
     const { messages, mode } = req.body || {};
 
     if (!Array.isArray(messages) || messages.length === 0) {
-      return res.status(400).json({ error: "Messages are required" });
+      return res.status(400).json({
+        error: "Messages are required"
+      });
     }
 
-    const apiKey = process.env.ANTHROPIC_API_KEY;
+    const apiKey = process.env.GEMINI_API_KEY;
 
     if (!apiKey) {
       return res.status(500).json({
-        error: "ANTHROPIC_API_KEY is not configured"
+        error: "GEMINI_API_KEY is not configured"
       });
     }
 
@@ -143,58 +145,94 @@ If there is not enough evidence, return:
 }
 `;
 
-    let systemPrompt = mode === "analysis"
-      ? ANALYSIS_SYSTEM
-      : CONVO_SYSTEM;
+    const systemPrompt =
+      mode === "analysis"
+        ? ANALYSIS_SYSTEM
+        : CONVO_SYSTEM;
 
-    let anthropicMessages = messages;
+    let contents;
 
     if (mode === "analysis") {
       const transcript = messages
-        .map(m => `${m.role === "user" ? "User" : "AI"}: ${m.content}`)
+        .map(
+          m =>
+            `${m.role === "user" ? "User" : "AI"}: ${m.content}`
+        )
         .join("\n");
 
-      anthropicMessages = [
+      contents = [
         {
           role: "user",
-          content: `${ANALYSIS_SYSTEM}
+          parts: [
+            {
+              text: `
+Analyze the following English-practice transcript.
 
 TRANSCRIPT:
 
-${transcript}`
+${transcript}
+`
+            }
+          ]
         }
       ];
+    } else {
+      contents = messages.map(m => ({
+        role: m.role === "assistant" ? "model" : "user",
+        parts: [
+          {
+            text: m.content
+          }
+        ]
+      }));
     }
 
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01"
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-5",
-        max_tokens: mode === "analysis" ? 1500 : 500,
-        system: systemPrompt,
-        messages: anthropicMessages
-      })
-    });
+    const response = await fetch(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": apiKey
+        },
+        body: JSON.stringify({
+          systemInstruction: {
+            parts: [
+              {
+                text: systemPrompt
+              }
+            ]
+          },
+          contents: contents,
+          generationConfig: {
+            maxOutputTokens: mode === "analysis" ? 1500 : 500
+          }
+        })
+      }
+    );
 
     const data = await response.json();
 
     if (!response.ok) {
-      console.error("Anthropic API error:", data);
+      console.error("Gemini API error:", data);
 
       return res.status(response.status).json({
-        error: data?.error?.message || "Claude API request failed"
+        error:
+          data?.error?.message ||
+          "Gemini API request failed"
       });
     }
 
-    const text = data?.content
-      ?.filter(block => block.type === "text")
-      ?.map(block => block.text)
-      ?.join("") || "";
+    const text =
+      data?.candidates?.[0]?.content?.parts
+        ?.map(part => part.text || "")
+        ?.join("") || "";
+
+    if (!text) {
+      return res.status(500).json({
+        error: "Gemini returned an empty response"
+      });
+    }
 
     if (mode === "analysis") {
       let parsed;
@@ -205,14 +243,16 @@ ${transcript}`
         console.error("Invalid analysis JSON:", text);
 
         return res.status(500).json({
-          error: "Claude returned invalid analysis JSON"
+          error: "Gemini returned invalid analysis JSON"
         });
       }
 
       return res.status(200).json(parsed);
     }
 
-    return res.status(200).json({ text });
+    return res.status(200).json({
+      text
+    });
 
   } catch (error) {
     console.error("Server error:", error);
